@@ -16,6 +16,11 @@ on:
         required: true
         default: false
         type: boolean
+      skip_tls_verification:
+        description: "UNSAFE: ignore invalid HTTPS certificates for this run only"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -50,6 +55,7 @@ jobs:
           OUTPUT_FILENAME: ${{ inputs.output_filename }}
           OUTPUT_DIR: release-output
           CONFIRM_PUBLIC_RIGHTS: ${{ inputs.confirm_public_rights }}
+          SKIP_TLS_VERIFICATION: ${{ inputs.skip_tls_verification }}
         run: python tools/downloader.py
 
       - name: Create public release and upload original file
