@@ -18,6 +18,24 @@ class DownloaderTests(unittest.TestCase):
     def test_empty_filename_fallback(self):
         self.assertEqual(MODULE.safe_filename("..."), "downloaded-file.bin")
 
+    def test_plan_ranges_cover_file_without_gaps(self):
+        total = 101
+        ranges = MODULE.plan_ranges(total, 8)
+        self.assertEqual(ranges[0][0], 0)
+        self.assertEqual(ranges[-1][1], total - 1)
+        for previous, current in zip(ranges, ranges[1:]):
+            self.assertEqual(previous[1] + 1, current[0])
+        self.assertEqual(sum(end - start + 1 for start, end in ranges), total)
+
+    def test_plan_ranges_respects_connection_cap(self):
+        ranges = MODULE.plan_ranges(1024 * 1024 * 1024, 99)
+        self.assertLessEqual(len(ranges), MODULE.MAX_ALLOWED_CONNECTIONS)
+
+    def test_parse_content_range(self):
+        self.assertEqual(MODULE.parse_content_range("bytes 0-0/12345"), (0, 0, 12345))
+        self.assertIsNone(MODULE.parse_content_range("bytes */12345"))
+        self.assertIsNone(MODULE.parse_content_range("invalid"))
+
     def test_progress_for_known_file_size(self):
         message = MODULE.progress_message(50 * 1024 * 1024, 100 * 1024 * 1024, 10)
         self.assertIn("50.0%", message)
