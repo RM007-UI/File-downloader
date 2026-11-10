@@ -68,6 +68,8 @@ jobs:
           FILE_PATH: ${{ steps.download.outputs.file_path }}
           FILE_NAME: ${{ steps.download.outputs.file_name }}
           FILE_SIZE: ${{ steps.download.outputs.size_mib }}
+          FILE_DURATION: ${{ steps.download.outputs.duration_seconds }}
+          FILE_AVG_SPEED: ${{ steps.download.outputs.average_speed_bytes_per_second }}
           FILE_SHA256: ${{ steps.download.outputs.sha256 }}
           SOURCE_HOST: ${{ steps.download.outputs.source_host }}
         shell: bash
@@ -104,7 +106,11 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
               summary.write("# Public direct download ready\n\n")
               summary.write(f"- File: {filename}\n")
-              summary.write(f"- Size: {os.environ['FILE_SIZE']} MiB\n")
+              summary.write("- Progress: 100% complete\n")
+              summary.write(f"- Downloaded: {os.environ['FILE_SIZE']} MiB / {os.environ['FILE_SIZE']} MiB\n")
+              summary.write("- Remaining: 0 B\n")
+              summary.write(f"- Download time: {os.environ['FILE_DURATION']} seconds\n")
+              summary.write(f"- Average speed: {os.environ['FILE_AVG_SPEED']} B/s\n")
               summary.write(f"- SHA-256: {os.environ['FILE_SHA256']}\n")
               summary.write(f"- Source host: {os.environ['SOURCE_HOST']}\n\n")
               summary.write(f"## [Download original file]({direct_url})\n\n")
