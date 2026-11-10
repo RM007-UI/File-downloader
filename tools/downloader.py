@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""Fetch a direct public HTTP(S) file as raw bytes for a GitHub Release asset."""
+"""Multi-connection direct HTTP(S) downloader for authorized public files."""
 from __future__ import annotations
 
 import hashlib
 import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import tempfile
+import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
-MAX_BYTES = 1900 * 1024 * 1024  # Below GitHub's 2 GiB per-release-asset limit.
+MAX_BYTES = 1900 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
+MIN_PARALLEL_SIZE = 8 * 1024 * 1024
 TIMEOUT_SECONDS = 60
+RETRIES = 3
+MAX_ALLOWED_CONNECTIONS = 16
 
 
 class DownloadError(Exception):
@@ -48,7 +54,6 @@ def format_duration(seconds: float) -> str:
 def progress_message(downloaded: int, total: int | None, elapsed: float) -> str:
     speed = downloaded / max(elapsed, 0.001)
     speed_text = f"{format_bytes(speed)}/s"
-
     if total is None or total <= 0:
         return (
             f"Downloaded: {format_bytes(downloaded)} | Total: unknown | "
@@ -56,7 +61,7 @@ def progress_message(downloaded: int, total: int | None, elapsed: float) -> str:
             f"Elapsed: {format_duration(elapsed)}"
         )
 
-    percent = min(100.0, downloaded * 100.0 / total)
+    percent = min(100.0, max(0.0, downloaded * 100.0 / total))
     remaining = max(0, total - downloaded)
     eta = remaining / speed if speed > 0 else 0
     filled = min(20, int(percent // 5))
@@ -66,6 +71,73 @@ def progress_message(downloaded: int, total: int | None, elapsed: float) -> str:
         f"{format_bytes(total)} | Remaining: {format_bytes(remaining)} | "
         f"Speed: {speed_text} | ETA: {format_duration(eta)}"
     )
+
+
+class ProgressReporter:
+    """Thread-safe aggregate progress for single- and multi-connection transfers."""
+
+    def __init__(self, total: int | None):
+        self.total = total
+        self.started_at = time.monotonic()
+        self.downloaded = 0
+        self.last_report_at = 0.0
+        self.last_percent = -5.0
+        self.lock = threading.Lock()
+
+    def update(self, delta: int, force: bool = False) -> None:
+        with self.lock:
+            self.downloaded = max(0, self.downloaded + delta)
+            now = time.monotonic()
+            elapsed = now - self.started_at
+            percent = (
+                self.downloaded * 100.0 / self.total
+                if self.total and self.total > 0
+                else None
+            )
+            time_due = now - self.last_report_at >= 2.0
+            percent_due = percent is not None and percent - self.last_percent >= 5.0
+            if force or time_due or percent_due:
+                print(
+                    "[download-progress] "
+                    + progress_message(self.downloaded, self.total, elapsed),
+                    flush=True,
+                )
+                self.last_report_at = now
+                if percent is not None:
+                    self.last_percent = percent
+
+    def finish(self) -> float:
+        self.update(0, force=True)
+        return time.monotonic() - self.started_at
+
+
+def plan_ranges(total: int, max_connections: int) -> list[tuple[int, int]]:
+    """Return inclusive, contiguous byte ranges covering [0, total-1]."""
+    if total <= 0:
+        return []
+    connections = max(1, min(int(max_connections), MAX_ALLOWED_CONNECTIONS))
+    connections = min(connections, max(1, (total + MIN_PARALLEL_SIZE - 1) // MIN_PARALLEL_SIZE))
+    base, extra = divmod(total, connections)
+    ranges = []
+    start = 0
+    for index in range(connections):
+        length = base + (1 if index < extra else 0)
+        end = start + length - 1
+        ranges.append((start, end))
+        start = end + 1
+    return ranges
+
+
+def parse_content_range(value: str | None) -> tuple[int, int, int] | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+)", value.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    start, end, total = map(int, match.groups())
+    if start > end or total <= end:
+        return None
+    return start, end, total
 
 
 def validate_public_url(url: str) -> None:
@@ -86,8 +158,7 @@ def validate_public_url(url: str) -> None:
         except ValueError:
             try:
                 records = socket.getaddrinfo(
-                    host,
-                    parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+                    host, parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
                     type=socket.SOCK_STREAM,
                 )
             except socket.gaierror:
@@ -110,7 +181,6 @@ class PublicOnlyRedirectHandler(HTTPRedirectHandler):
 
 
 def build_ssl_context(skip_tls_verification: bool = False) -> ssl.SSLContext:
-    """Use normal certificate checks by default; bypass only when explicitly requested."""
     if skip_tls_verification:
         print(
             "WARNING: TLS certificate verification is DISABLED for this run. "
@@ -118,6 +188,24 @@ def build_ssl_context(skip_tls_verification: bool = False) -> ssl.SSLContext:
         )
         return ssl._create_unverified_context()
     return ssl.create_default_context()
+
+
+def make_opener(skip_tls_verification: bool = False):
+    return build_opener(
+        PublicOnlyRedirectHandler(),
+        HTTPSHandler(context=build_ssl_context(skip_tls_verification)),
+    )
+
+
+def make_request(url: str, extra_headers: dict[str, str] | None = None) -> Request:
+    headers = {
+        "User-Agent": "RM007-Direct-Link-Downloader/2.0",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return Request(url, headers=headers, method="GET")
 
 
 def safe_filename(value: str) -> str:
@@ -149,29 +237,13 @@ def choose_filename(headers, final_url: str, requested_name: str) -> str:
     return safe_filename(unquote(segment) if segment else "")
 
 
-def download(
-    url: str,
-    requested_name: str,
-    output_dir: Path,
-    skip_tls_verification: bool = False,
-) -> dict:
-    validate_public_url(url)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    request = Request(
-        url,
-        headers={"User-Agent": "RM007-Direct-Link-Downloader/1.0", "Accept": "*/*"},
-        method="GET",
-    )
-    ssl_context = build_ssl_context(skip_tls_verification)
-    opener = build_opener(
-        PublicOnlyRedirectHandler(),
-        HTTPSHandler(context=ssl_context),
-    )
-
+def _open_response(opener, url: str, headers: dict[str, str] | None = None):
     try:
-        response = opener.open(request, timeout=TIMEOUT_SECONDS)
+        response = opener.open(make_request(url, headers), timeout=TIMEOUT_SECONDS)
     except HTTPError as exc:
+        if exc.code in {400, 405, 416, 501}:
+            exc.close()
+            return None
         raise DownloadError(f"The file host returned HTTP {exc.code}.") from None
     except URLError as exc:
         reason = getattr(exc, "reason", "network error")
@@ -179,96 +251,308 @@ def download(
     except TimeoutError:
         raise DownloadError("The file host timed out.") from None
 
-    with response:
-        validate_public_url(response.geturl())
-        status = getattr(response, "status", 200)
-        if status < 200 or status >= 300:
-            raise DownloadError(f"The file host returned HTTP {status}.")
+    validate_public_url(response.geturl())
+    status = getattr(response, "status", 200)
+    if status < 200 or status >= 300:
+        response.close()
+        raise DownloadError(f"The file host returned HTTP {status}.")
+    return response
 
-        declared_size = response.headers.get("Content-Length")
-        total_size = None
-        if declared_size:
-            try:
-                declared_value = int(declared_size)
-            except ValueError:
-                declared_value = None
-            if declared_value is not None:
-                total_size = declared_value
-                if declared_value > MAX_BYTES:
-                    raise DownloadError("The file exceeds the 1900 MiB limit.")
 
-        filename = choose_filename(response.headers, response.geturl(), requested_name)
-        final_path = output_dir / filename
-        if final_path.exists():
-            raise DownloadError("A file with that output name already exists.")
-
-        digest = hashlib.sha256()
-        total = 0
-        started_at = time.monotonic()
-        last_report_at = 0.0
-        last_reported_percent = -5.0
-
-        def report_progress(force: bool = False) -> None:
-            nonlocal last_report_at, last_reported_percent
-            now = time.monotonic()
-            elapsed = now - started_at
-            percent = (total * 100.0 / total_size) if total_size else None
-            time_due = now - last_report_at >= 2.0
-            percent_due = (
-                percent is not None
-                and percent - last_reported_percent >= 5.0
-            )
-            if force or time_due or percent_due:
-                print(
-                    "[download-progress] " + progress_message(total, total_size, elapsed),
-                    flush=True,
-                )
-                last_report_at = now
-                if percent is not None:
-                    last_reported_percent = percent
-
-        fd, temporary_name = tempfile.mkstemp(prefix=".download-", suffix=".part", dir=output_dir)
+def _single_stream(response, output_dir: Path, filename: str, total_hint: int | None) -> tuple[Path, int, str, float, int]:
+    total_size = total_hint
+    declared = response.headers.get("Content-Length")
+    if declared:
         try:
-            with os.fdopen(fd, "wb") as destination:
-                report_progress(force=True)
-                while True:
-                    chunk = response.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_BYTES:
-                        raise DownloadError("The file exceeded the 1900 MiB limit.")
-                    destination.write(chunk)
-                    digest.update(chunk)
-                    report_progress()
+            declared_value = int(declared)
+            if declared_value >= 0:
+                total_size = declared_value
+        except ValueError:
+            pass
+    if total_size is not None and total_size > MAX_BYTES:
+        raise DownloadError("The file exceeds the 1900 MiB limit.")
 
-            if total == 0:
-                raise DownloadError("The server returned an empty file.")
-            elapsed_seconds = time.monotonic() - started_at
-            report_progress(force=True)
-            os.replace(temporary_name, final_path)
-        except Exception:
+    final_path = output_dir / filename
+    digest = hashlib.sha256()
+    reporter = ProgressReporter(total_size)
+    fd, temporary_name = tempfile.mkstemp(prefix=".download-", suffix=".part", dir=output_dir)
+    try:
+        with os.fdopen(fd, "wb") as destination:
+            reporter.update(0, force=True)
+            while True:
+                chunk = response.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                if reporter.downloaded + len(chunk) > MAX_BYTES:
+                    raise DownloadError("The file exceeded the 1900 MiB limit.")
+                destination.write(chunk)
+                digest.update(chunk)
+                reporter.update(len(chunk))
+        if reporter.downloaded == 0:
+            raise DownloadError("The server returned an empty file.")
+        elapsed = reporter.finish()
+        os.replace(temporary_name, final_path)
+        return final_path, reporter.downloaded, digest.hexdigest(), elapsed, 1
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        response.close()
+
+
+def _parallel_ranges(
+    url: str,
+    output_dir: Path,
+    filename: str,
+    total_size: int,
+    requested_connections: int,
+    skip_tls_verification: bool,
+) -> tuple[Path, int, str, float, int]:
+    ranges = plan_ranges(total_size, requested_connections)
+    if len(ranges) < 2:
+        raise DownloadError("The file is too small for a useful multi-connection transfer.")
+    if not hasattr(os, "pwrite"):
+        raise DownloadError("This runner does not support parallel positional writes.")
+
+    final_path = output_dir / filename
+    reporter = ProgressReporter(total_size)
+    fd, temporary_name = tempfile.mkstemp(prefix=".download-", suffix=".part", dir=output_dir)
+    os.ftruncate(fd, total_size)
+    progress_lock = threading.Lock()
+    per_segment_progress = [0] * len(ranges)
+
+    def worker(index: int, start: int, end: int) -> None:
+        expected_length = end - start + 1
+        last_error = "unknown range transfer error"
+        for attempt in range(1, RETRIES + 1):
+            with progress_lock:
+                previous = per_segment_progress[index]
+                if previous:
+                    reporter.update(-previous)
+                    per_segment_progress[index] = 0
+            received = 0
+            response = None
             try:
-                os.unlink(temporary_name)
-            except FileNotFoundError:
-                pass
-            raise
+                opener = make_opener(skip_tls_verification)
+                response = _open_response(
+                    opener,
+                    url,
+                    {"Range": f"bytes={start}-{end}"},
+                )
+                if response is None:
+                    raise DownloadError("The server rejected an HTTP Range request.")
+                with response:
+                    if getattr(response, "status", 200) != 206:
+                        raise DownloadError("The server ignored an HTTP Range request.")
+                    content_range = parse_content_range(response.headers.get("Content-Range"))
+                    if content_range != (start, end, total_size):
+                        raise DownloadError("The server returned an unexpected Content-Range.")
 
-        metadata = {
-            "file_name": filename,
-            "size_bytes": total,
-            "size_mib": round(total / (1024 * 1024), 2),
-            "duration_seconds": round(elapsed_seconds, 2),
-            "average_speed_bytes_per_second": round(total / max(elapsed_seconds, 0.001), 2),
-            "sha256": digest.hexdigest(),
-            "content_type": response.headers.get("Content-Type", "unknown"),
-            "source_host": urlsplit(response.geturl()).hostname,
-        }
-        (output_dir / "download-metadata.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+                    while received < expected_length:
+                        chunk = response.read(min(CHUNK_SIZE, expected_length - received))
+                        if not chunk:
+                            raise DownloadError("A range ended before all requested bytes arrived.")
+
+                        view = memoryview(chunk)
+                        offset = start + received
+                        written = 0
+                        while written < len(chunk):
+                            count = os.pwrite(fd, view[written:], offset + written)
+                            if count <= 0:
+                                raise OSError("A positional file write returned zero bytes.")
+                            written += count
+
+                        received += len(chunk)
+                        with progress_lock:
+                            per_segment_progress[index] = received
+                            reporter.update(len(chunk))
+
+                    if response.read(1):
+                        raise DownloadError("The server returned more bytes than the requested range.")
+                    return
+            except (DownloadError, OSError, URLError, TimeoutError) as exc:
+                last_error = str(exc) or type(exc).__name__
+                if response is not None:
+                    response.close()
+                if attempt < RETRIES:
+                    print(
+                        f"[range-retry] Part {index + 1}/{len(ranges)}, "
+                        f"attempt {attempt + 1}/{RETRIES}: {last_error}",
+                        flush=True,
+                    )
+                    time.sleep(min(2 ** (attempt - 1), 8))
+            except Exception:
+                if response is not None:
+                    response.close()
+                raise
+
+        raise DownloadError(f"Range {start}-{end} failed after {RETRIES} attempts: {last_error}")
+
+    started = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="range-download")
+    futures = [
+        executor.submit(worker, index, start, end)
+        for index, (start, end) in enumerate(ranges)
+    ]
+    try:
+        for future in as_completed(futures):
+            future.result()
+        os.fsync(fd)
+    except Exception:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        os.close(fd)
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+    os.close(fd)
+    elapsed = max(time.monotonic() - reporter.started_at, 0.001)
+    reporter.update(0, force=True)
+    digest = hashlib.sha256()
+    try:
+        with open(temporary_name, "rb") as source:
+            while True:
+                block = source.read(CHUNK_SIZE)
+                if not block:
+                    break
+                digest.update(block)
+        if os.path.getsize(temporary_name) != total_size:
+            raise DownloadError("The completed file size does not match the server's advertised size.")
+        os.replace(temporary_name, final_path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+    return final_path, total_size, digest.hexdigest(), elapsed, len(ranges)
+
+
+def download(
+    url: str,
+    requested_name: str,
+    output_dir: Path,
+    skip_tls_verification: bool = False,
+    max_connections: int = 8,
+) -> dict:
+    validate_public_url(url)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    connections = max(1, min(int(max_connections), MAX_ALLOWED_CONNECTIONS))
+    probe_opener = make_opener(skip_tls_verification)
+
+    # Ask for the first byte. A 206 with Content-Range proves Range support.
+    probe = None
+    try:
+        probe = _open_response(probe_opener, url, {"Range": "bytes=0-0"})
+    except DownloadError:
+        raise
+
+    if probe is None:
+        print("[download-mode] Range requests are not supported; using one connection.", flush=True)
+        response = _open_response(make_opener(skip_tls_verification), url)
+        if response is None:
+            raise DownloadError("The server refused a normal GET request.")
+        filename = choose_filename(response.headers, response.geturl(), requested_name)
+        final_path, total, sha256, elapsed, used_connections = _single_stream(
+            response, output_dir, filename, None
         )
-        return metadata
+        range_supported = False
+    else:
+        status = getattr(probe, "status", 200)
+        filename = choose_filename(probe.headers, probe.geturl(), requested_name)
+
+        if status == 206:
+            content_range = parse_content_range(probe.headers.get("Content-Range"))
+            first_byte = probe.read(1)
+            probe.close()
+            if content_range and content_range[0] == 0 and content_range[1] >= 0 and len(first_byte) == 1:
+                total_size = content_range[2]
+                if total_size > MAX_BYTES:
+                    raise DownloadError("The file exceeds the 1900 MiB limit.")
+                ranges = plan_ranges(total_size, connections)
+                if len(ranges) >= 2:
+                    print(
+                        f"[download-mode] HTTP Range supported; using {len(ranges)} parallel connections.",
+                        flush=True,
+                    )
+                    try:
+                        final_path, total, sha256, elapsed, used_connections = _parallel_ranges(
+                            url, output_dir, filename, total_size, connections, skip_tls_verification
+                        )
+                        range_supported = True
+                    except DownloadError as exc:
+                        print(
+                            f"[download-mode] Parallel ranges failed ({exc}); retrying with one connection.",
+                            flush=True,
+                        )
+                        response = _open_response(make_opener(skip_tls_verification), url)
+                        if response is None:
+                            raise DownloadError("The server refused fallback GET.") from exc
+                        final_path, total, sha256, elapsed, used_connections = _single_stream(
+                            response, output_dir, filename, total_size
+                        )
+                        range_supported = False
+                else:
+                    response = _open_response(make_opener(skip_tls_verification), url)
+                    if response is None:
+                        raise DownloadError("The server refused a normal GET request.")
+                    final_path, total, sha256, elapsed, used_connections = _single_stream(
+                        response, output_dir, filename, total_size
+                    )
+                    range_supported = True
+            else:
+                print("[download-mode] The Range probe was incomplete; using one connection.", flush=True)
+                response = _open_response(make_opener(skip_tls_verification), url)
+                if response is None:
+                    raise DownloadError("The server refused a normal GET request.")
+                final_path, total, sha256, elapsed, used_connections = _single_stream(
+                    response, output_dir, filename, None
+                )
+                range_supported = False
+        elif status == 200:
+            print("[download-mode] Server ignored Range; using the existing response as a single stream.", flush=True)
+            total_hint = None
+            declared = probe.headers.get("Content-Length")
+            if declared:
+                try:
+                    total_hint = int(declared)
+                except ValueError:
+                    pass
+            final_path, total, sha256, elapsed, used_connections = _single_stream(
+                probe, output_dir, filename, total_hint
+            )
+            range_supported = False
+        else:
+            probe.close()
+            raise DownloadError(f"Unexpected HTTP status during Range probe: {status}.")
+
+    metadata = {
+        "file_name": final_path.name,
+        "size_bytes": total,
+        "size_mib": round(total / (1024 * 1024), 2),
+        "duration_seconds": round(elapsed, 2),
+        "average_speed_bytes_per_second": round(total / max(elapsed, 0.001), 2),
+        "sha256": sha256,
+        "content_type": "unknown",
+        "source_host": urlsplit(url).hostname,
+        "range_supported": range_supported,
+        "connections_used": used_connections,
+    }
+    (output_dir / "download-metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return metadata
 
 
 def main() -> int:
@@ -285,8 +569,13 @@ def main() -> int:
 
     try:
         skip_tls = os.environ.get("SKIP_TLS_VERIFICATION", "").lower() == "true"
-        metadata = download(url, requested_name, output_dir, skip_tls_verification=skip_tls)
-    except DownloadError as exc:
+        max_connections = int(os.environ.get("MAX_CONNECTIONS", "8"))
+        metadata = download(
+            url, requested_name, output_dir,
+            skip_tls_verification=skip_tls,
+            max_connections=max_connections,
+        )
+    except (DownloadError, ValueError) as exc:
         print(f"Download failed: {exc}")
         return 1
     except OSError as exc:
@@ -301,12 +590,15 @@ def main() -> int:
         output.write(f"size_bytes={metadata['size_bytes']}\n")
         output.write(f"duration_seconds={metadata['duration_seconds']}\n")
         output.write(f"average_speed_bytes_per_second={metadata['average_speed_bytes_per_second']}\n")
+        output.write(f"connections_used={metadata['connections_used']}\n")
+        output.write(f"range_supported={str(metadata['range_supported']).lower()}\n")
         output.write(f"sha256={metadata['sha256']}\n")
-        output.write(f"content_type={metadata['content_type']}\n")
         output.write(f"source_host={metadata['source_host']}\n")
 
     print(f"Downloaded: {metadata['file_name']}")
     print(f"Size: {metadata['size_mib']} MiB")
+    print(f"Connections used: {metadata['connections_used']}")
+    print(f"Range supported: {metadata['range_supported']}")
     print(f"SHA-256: {metadata['sha256']}")
     return 0
 
