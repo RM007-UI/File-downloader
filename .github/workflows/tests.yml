@@ -26,4 +26,4 @@ jobs:
       - name: Install actionlint
         run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
       - name: Validate all GitHub Actions workflows
-        run: $HOME/go/bin/actionlint -color
+        run: '"$HOME/go/bin/actionlint" -color'
