@@ -110,4 +110,5 @@ jobs:
       - name: Show public link
         env:
           DIRECT_URL: ${{ steps.publish.outputs.direct_url }}
-        run: echo "Public direct download: $DIRECT_URL"
+        run: |
+          echo "Public direct download: $DIRECT_URL"
