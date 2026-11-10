@@ -261,6 +261,7 @@ def _open_response(opener, url: str, headers: dict[str, str] | None = None):
 
 def _single_stream(response, output_dir: Path, filename: str, total_hint: int | None) -> tuple[Path, int, str, float, int]:
     total_size = total_hint
+    content_type = response.headers.get("Content-Type", "unknown")
     declared = response.headers.get("Content-Length")
     if declared:
         try:
@@ -466,11 +467,13 @@ def download(
         final_path, total, sha256, elapsed, used_connections = _single_stream(
             response, output_dir, filename, None
         )
+        content_type = response.headers.get("Content-Type", "unknown")
         range_supported = False
     else:
         status = getattr(probe, "status", 200)
         filename = choose_filename(probe.headers, probe.geturl(), requested_name)
 
+        content_type = probe.headers.get("Content-Type", "unknown")
         if status == 206:
             content_range = parse_content_range(probe.headers.get("Content-Range"))
             first_byte = probe.read(1)
@@ -543,7 +546,7 @@ def download(
         "duration_seconds": round(elapsed, 2),
         "average_speed_bytes_per_second": round(total / max(elapsed, 0.001), 2),
         "sha256": sha256,
-        "content_type": "unknown",
+        "content_type": content_type,
         "source_host": urlsplit(url).hostname,
         "range_supported": range_supported,
         "connections_used": used_connections,
