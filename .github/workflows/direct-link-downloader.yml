@@ -21,6 +21,16 @@ on:
         required: true
         default: false
         type: boolean
+      max_connections:
+        description: "Maximum parallel connections (server must support HTTP Range)"
+        required: true
+        default: "8"
+        type: choice
+        options:
+          - "4"
+          - "8"
+          - "12"
+          - "16"
 
 permissions:
   contents: write
@@ -56,6 +66,7 @@ jobs:
           OUTPUT_DIR: release-output
           CONFIRM_PUBLIC_RIGHTS: ${{ inputs.confirm_public_rights }}
           SKIP_TLS_VERIFICATION: ${{ inputs.skip_tls_verification }}
+          MAX_CONNECTIONS: ${{ inputs.max_connections }}
         run: python tools/downloader.py
 
       - name: Create public release and upload original file
@@ -70,6 +81,8 @@ jobs:
           FILE_SIZE: ${{ steps.download.outputs.size_mib }}
           FILE_DURATION: ${{ steps.download.outputs.duration_seconds }}
           FILE_AVG_SPEED: ${{ steps.download.outputs.average_speed_bytes_per_second }}
+          FILE_CONNECTIONS: ${{ steps.download.outputs.connections_used }}
+          RANGE_SUPPORTED: ${{ steps.download.outputs.range_supported }}
           FILE_SHA256: ${{ steps.download.outputs.sha256 }}
           SOURCE_HOST: ${{ steps.download.outputs.source_host }}
         shell: bash
@@ -111,6 +124,8 @@ jobs:
               summary.write("- Remaining: 0 B\n")
               summary.write(f"- Download time: {os.environ['FILE_DURATION']} seconds\n")
               summary.write(f"- Average speed: {os.environ['FILE_AVG_SPEED']} B/s\n")
+              summary.write(f"- Parallel connections: {os.environ['FILE_CONNECTIONS']}\n")
+              summary.write(f"- HTTP Range supported: {os.environ['RANGE_SUPPORTED']}\n")
               summary.write(f"- SHA-256: {os.environ['FILE_SHA256']}\n")
               summary.write(f"- Source host: {os.environ['SOURCE_HOST']}\n\n")
               summary.write(f"## [Download original file]({direct_url})\n\n")
