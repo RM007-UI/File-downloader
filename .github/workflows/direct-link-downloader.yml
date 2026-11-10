@@ -24,7 +24,7 @@ on:
       max_connections:
         description: "Maximum parallel connections (server must support HTTP Range)"
         required: true
-        default: "8"
+        default: "16"
         type: choice
         options:
           - "4"
