@@ -1,0 +1,113 @@
+name: Direct Link Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: "Direct public HTTP/HTTPS URL of the file"
+        required: true
+        type: string
+      output_filename:
+        description: "Optional filename (blank uses the server filename)"
+        required: false
+        type: string
+      confirm_public_rights:
+        description: "I own this file or have permission to publish it publicly"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: direct-link-downloader
+  cancel-in-progress: false
+
+jobs:
+  download-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Require public distribution permission
+        if: ${{ inputs.confirm_public_rights != true }}
+        run: |
+          echo "::error::Confirm that you own the file or have permission to publish it publicly."
+          exit 1
+
+      - name: Check out downloader
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download any file format
+        id: download
+        env:
+          FILE_URL: ${{ inputs.file_url }}
+          OUTPUT_FILENAME: ${{ inputs.output_filename }}
+          OUTPUT_DIR: release-output
+          CONFIRM_PUBLIC_RIGHTS: ${{ inputs.confirm_public_rights }}
+        run: python tools/downloader.py
+
+      - name: Create public release and upload original file
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          FILE_PATH: ${{ steps.download.outputs.file_path }}
+          FILE_NAME: ${{ steps.download.outputs.file_name }}
+          FILE_SIZE: ${{ steps.download.outputs.size_mib }}
+          FILE_SHA256: ${{ steps.download.outputs.sha256 }}
+          SOURCE_HOST: ${{ steps.download.outputs.source_host }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="direct-download-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          gh release create "$TAG" "$FILE_PATH" \
+            --repo "$REPOSITORY" \
+            --title "Direct download: $FILE_NAME" \
+            --notes "File: $FILE_NAME
+          Size: $FILE_SIZE MiB
+          SHA-256: $FILE_SHA256
+          Source host: $SOURCE_HOST" \
+            --prerelease
+
+          gh api "repos/$REPOSITORY/releases/tags/$TAG" > release.json
+
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          release = json.loads(Path("release.json").read_text(encoding="utf-8"))
+          filename = os.environ["FILE_NAME"]
+          asset = next((item for item in release.get("assets", []) if item.get("name") == filename), None)
+          if not asset or not asset.get("browser_download_url"):
+              raise SystemExit("Release was created, but GitHub did not return an asset download URL.")
+
+          direct_url = asset["browser_download_url"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"direct_url={direct_url}\n")
+              output.write(f"release_url={release.get('html_url', '')}\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("# Public direct download ready\n\n")
+              summary.write(f"- File: {filename}\n")
+              summary.write(f"- Size: {os.environ['FILE_SIZE']} MiB\n")
+              summary.write(f"- SHA-256: {os.environ['FILE_SHA256']}\n")
+              summary.write(f"- Source host: {os.environ['SOURCE_HOST']}\n\n")
+              summary.write(f"## [Download original file]({direct_url})\n\n")
+              summary.write(f"[Open GitHub Release]({release.get('html_url', '')})\n")
+
+          print(direct_url)
+          PY
+
+      - name: Show public link
+        env:
+          DIRECT_URL: ${{ steps.publish.outputs.direct_url }}
+        run: echo "Public direct download: $DIRECT_URL"
