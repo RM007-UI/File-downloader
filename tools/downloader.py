@@ -22,10 +22,10 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_ope
 
 MAX_BYTES = 1900 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
-MIN_PARALLEL_SIZE = 8 * 1024 * 1024
+MIN_PARALLEL_SIZE = 4 * 1024 * 1024
 TIMEOUT_SECONDS = 60
 RETRIES = 3
-MAX_ALLOWED_CONNECTIONS = 16
+MAX_ALLOWED_CONNECTIONS = 32
 
 
 class DownloadError(Exception):
@@ -572,7 +572,7 @@ def main() -> int:
 
     try:
         skip_tls = os.environ.get("SKIP_TLS_VERIFICATION", "").lower() == "true"
-        max_connections = int(os.environ.get("MAX_CONNECTIONS", "16"))
+        max_connections = int(os.environ.get("MAX_CONNECTIONS", "32"))
         metadata = download(
             url, requested_name, output_dir,
             skip_tls_verification=skip_tls,
