@@ -30,11 +30,22 @@ class DownloaderTests(unittest.TestCase):
     def test_plan_ranges_respects_connection_cap(self):
         ranges = MODULE.plan_ranges(1024 * 1024 * 1024, 99)
         self.assertLessEqual(len(ranges), MODULE.MAX_ALLOWED_CONNECTIONS)
+        self.assertEqual(len(ranges), 32)
+
+    def test_plan_ranges_respects_32_connection_cap(self):
+        ranges = MODULE.plan_ranges(512 * 1024 * 1024, 99)
+        self.assertEqual(len(ranges), 32)
+        self.assertEqual(ranges[0][0], 0)
+        self.assertEqual(ranges[-1][1], 512 * 1024 * 1024 - 1)
 
     def test_plan_ranges_adapts_to_small_files(self):
-        ranges = MODULE.plan_ranges(5 * 1024 * 1024, 16)
+        ranges = MODULE.plan_ranges(3 * 1024 * 1024, 32)
         self.assertEqual(len(ranges), 1)
-        self.assertEqual(ranges, [(0, 5 * 1024 * 1024 - 1)])
+        self.assertEqual(ranges, [(0, 3 * 1024 * 1024 - 1)])
+
+    def test_plan_ranges_uses_more_connections_for_medium_files(self):
+        ranges = MODULE.plan_ranges(64 * 1024 * 1024, 32)
+        self.assertEqual(len(ranges), 16)
 
     def test_parse_content_range(self):
         self.assertEqual(MODULE.parse_content_range("bytes 0-0/12345"), (0, 0, 12345))
