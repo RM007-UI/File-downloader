@@ -9,6 +9,7 @@ import os
 import socket
 import ssl
 import tempfile
+import time
 import unicodedata
 from email.message import Message
 from pathlib import Path
@@ -23,6 +24,48 @@ TIMEOUT_SECONDS = 60
 
 class DownloadError(Exception):
     pass
+
+
+def format_bytes(value: float) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    amount = float(max(0, value))
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
+        amount /= 1024
+    return f"{amount:.1f} TB"
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def progress_message(downloaded: int, total: int | None, elapsed: float) -> str:
+    speed = downloaded / max(elapsed, 0.001)
+    speed_text = f"{format_bytes(speed)}/s"
+
+    if total is None or total <= 0:
+        return (
+            f"Downloaded: {format_bytes(downloaded)} | Total: unknown | "
+            f"Remaining: unknown | Progress: n/a | Speed: {speed_text} | "
+            f"Elapsed: {format_duration(elapsed)}"
+        )
+
+    percent = min(100.0, downloaded * 100.0 / total)
+    remaining = max(0, total - downloaded)
+    eta = remaining / speed if speed > 0 else 0
+    filled = min(20, int(percent // 5))
+    bar = "#" * filled + "-" * (20 - filled)
+    return (
+        f"[{bar}] {percent:5.1f}% | Downloaded: {format_bytes(downloaded)} / "
+        f"{format_bytes(total)} | Remaining: {format_bytes(remaining)} | "
+        f"Speed: {speed_text} | ETA: {format_duration(eta)}"
+    )
 
 
 def validate_public_url(url: str) -> None:
@@ -143,13 +186,16 @@ def download(
             raise DownloadError(f"The file host returned HTTP {status}.")
 
         declared_size = response.headers.get("Content-Length")
+        total_size = None
         if declared_size:
             try:
                 declared_value = int(declared_size)
             except ValueError:
                 declared_value = None
-            if declared_value is not None and declared_value > MAX_BYTES:
-                raise DownloadError("The file exceeds the 1900 MiB limit.")
+            if declared_value is not None:
+                total_size = declared_value
+                if declared_value > MAX_BYTES:
+                    raise DownloadError("The file exceeds the 1900 MiB limit.")
 
         filename = choose_filename(response.headers, response.geturl(), requested_name)
         final_path = output_dir / filename
@@ -158,9 +204,33 @@ def download(
 
         digest = hashlib.sha256()
         total = 0
+        started_at = time.monotonic()
+        last_report_at = 0.0
+        last_reported_percent = -5.0
+
+        def report_progress(force: bool = False) -> None:
+            nonlocal last_report_at, last_reported_percent
+            now = time.monotonic()
+            elapsed = now - started_at
+            percent = (total * 100.0 / total_size) if total_size else None
+            time_due = now - last_report_at >= 2.0
+            percent_due = (
+                percent is not None
+                and percent - last_reported_percent >= 5.0
+            )
+            if force or time_due or percent_due:
+                print(
+                    "[download-progress] " + progress_message(total, total_size, elapsed),
+                    flush=True,
+                )
+                last_report_at = now
+                if percent is not None:
+                    last_reported_percent = percent
+
         fd, temporary_name = tempfile.mkstemp(prefix=".download-", suffix=".part", dir=output_dir)
         try:
             with os.fdopen(fd, "wb") as destination:
+                report_progress(force=True)
                 while True:
                     chunk = response.read(CHUNK_SIZE)
                     if not chunk:
@@ -170,9 +240,12 @@ def download(
                         raise DownloadError("The file exceeded the 1900 MiB limit.")
                     destination.write(chunk)
                     digest.update(chunk)
+                    report_progress()
 
             if total == 0:
                 raise DownloadError("The server returned an empty file.")
+            elapsed_seconds = time.monotonic() - started_at
+            report_progress(force=True)
             os.replace(temporary_name, final_path)
         except Exception:
             try:
@@ -185,6 +258,8 @@ def download(
             "file_name": filename,
             "size_bytes": total,
             "size_mib": round(total / (1024 * 1024), 2),
+            "duration_seconds": round(elapsed_seconds, 2),
+            "average_speed_bytes_per_second": round(total / max(elapsed_seconds, 0.001), 2),
             "sha256": digest.hexdigest(),
             "content_type": response.headers.get("Content-Type", "unknown"),
             "source_host": urlsplit(response.geturl()).hostname,
@@ -223,6 +298,9 @@ def main() -> int:
         output.write(f"file_path={output_file.resolve()}\n")
         output.write(f"file_name={metadata['file_name']}\n")
         output.write(f"size_mib={metadata['size_mib']}\n")
+        output.write(f"size_bytes={metadata['size_bytes']}\n")
+        output.write(f"duration_seconds={metadata['duration_seconds']}\n")
+        output.write(f"average_speed_bytes_per_second={metadata['average_speed_bytes_per_second']}\n")
         output.write(f"sha256={metadata['sha256']}\n")
         output.write(f"content_type={metadata['content_type']}\n")
         output.write(f"source_host={metadata['source_host']}\n")
