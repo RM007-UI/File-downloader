@@ -595,6 +595,7 @@ def main() -> int:
         output.write(f"average_speed_bytes_per_second={metadata['average_speed_bytes_per_second']}\n")
         output.write(f"connections_used={metadata['connections_used']}\n")
         output.write(f"range_supported={str(metadata['range_supported']).lower()}\n")
+        output.write(f"content_type={metadata['content_type']}\n")
         output.write(f"sha256={metadata['sha256']}\n")
         output.write(f"source_host={metadata['source_host']}\n")
 
