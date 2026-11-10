@@ -24,13 +24,15 @@ on:
       max_connections:
         description: "Maximum parallel connections (server must support HTTP Range)"
         required: true
-        default: "16"
+        default: "32"
         type: choice
         options:
           - "4"
           - "8"
           - "12"
           - "16"
+          - "24"
+          - "32"
 
 permissions:
   contents: write
