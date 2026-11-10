@@ -19,7 +19,7 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(MODULE.safe_filename("..."), "downloaded-file.bin")
 
     def test_plan_ranges_cover_file_without_gaps(self):
-        total = 101
+        total = 101 * MODULE.MIN_PARALLEL_SIZE
         ranges = MODULE.plan_ranges(total, 8)
         self.assertEqual(ranges[0][0], 0)
         self.assertEqual(ranges[-1][1], total - 1)
@@ -30,6 +30,11 @@ class DownloaderTests(unittest.TestCase):
     def test_plan_ranges_respects_connection_cap(self):
         ranges = MODULE.plan_ranges(1024 * 1024 * 1024, 99)
         self.assertLessEqual(len(ranges), MODULE.MAX_ALLOWED_CONNECTIONS)
+
+    def test_plan_ranges_adapts_to_small_files(self):
+        ranges = MODULE.plan_ranges(5 * 1024 * 1024, 16)
+        self.assertEqual(len(ranges), 1)
+        self.assertEqual(ranges, [(0, 5 * 1024 * 1024 - 1)])
 
     def test_parse_content_range(self):
         self.assertEqual(MODULE.parse_content_range("bytes 0-0/12345"), (0, 0, 12345))
