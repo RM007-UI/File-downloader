@@ -7,13 +7,14 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
 import tempfile
 import unicodedata
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 MAX_BYTES = 1900 * 1024 * 1024  # Below GitHub's 2 GiB per-release-asset limit.
 CHUNK_SIZE = 1024 * 1024
@@ -65,6 +66,17 @@ class PublicOnlyRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def build_ssl_context(skip_tls_verification: bool = False) -> ssl.SSLContext:
+    """Use normal certificate checks by default; bypass only when explicitly requested."""
+    if skip_tls_verification:
+        print(
+            "WARNING: TLS certificate verification is DISABLED for this run. "
+            "The downloaded file could be intercepted or modified."
+        )
+        return ssl._create_unverified_context()
+    return ssl.create_default_context()
+
+
 def safe_filename(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = value.replace("\\", "/").split("/")[-1]
@@ -94,7 +106,12 @@ def choose_filename(headers, final_url: str, requested_name: str) -> str:
     return safe_filename(unquote(segment) if segment else "")
 
 
-def download(url: str, requested_name: str, output_dir: Path) -> dict:
+def download(
+    url: str,
+    requested_name: str,
+    output_dir: Path,
+    skip_tls_verification: bool = False,
+) -> dict:
     validate_public_url(url)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -103,7 +120,11 @@ def download(url: str, requested_name: str, output_dir: Path) -> dict:
         headers={"User-Agent": "RM007-Direct-Link-Downloader/1.0", "Accept": "*/*"},
         method="GET",
     )
-    opener = build_opener(PublicOnlyRedirectHandler())
+    ssl_context = build_ssl_context(skip_tls_verification)
+    opener = build_opener(
+        PublicOnlyRedirectHandler(),
+        HTTPSHandler(context=ssl_context),
+    )
 
     try:
         response = opener.open(request, timeout=TIMEOUT_SECONDS)
@@ -188,7 +209,8 @@ def main() -> int:
         return 2
 
     try:
-        metadata = download(url, requested_name, output_dir)
+        skip_tls = os.environ.get("SKIP_TLS_VERIFICATION", "").lower() == "true"
+        metadata = download(url, requested_name, output_dir, skip_tls_verification=skip_tls)
     except DownloadError as exc:
         print(f"Download failed: {exc}")
         return 1
