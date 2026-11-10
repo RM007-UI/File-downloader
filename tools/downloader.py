@@ -444,7 +444,7 @@ def download(
     requested_name: str,
     output_dir: Path,
     skip_tls_verification: bool = False,
-    max_connections: int = 8,
+    max_connections: int = 16,
 ) -> dict:
     validate_public_url(url)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -572,7 +572,7 @@ def main() -> int:
 
     try:
         skip_tls = os.environ.get("SKIP_TLS_VERIFICATION", "").lower() == "true"
-        max_connections = int(os.environ.get("MAX_CONNECTIONS", "8"))
+        max_connections = int(os.environ.get("MAX_CONNECTIONS", "16"))
         metadata = download(
             url, requested_name, output_dir,
             skip_tls_verification=skip_tls,
