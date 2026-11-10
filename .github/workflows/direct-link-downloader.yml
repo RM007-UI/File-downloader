@@ -83,6 +83,7 @@ jobs:
           FILE_AVG_SPEED: ${{ steps.download.outputs.average_speed_bytes_per_second }}
           FILE_CONNECTIONS: ${{ steps.download.outputs.connections_used }}
           RANGE_SUPPORTED: ${{ steps.download.outputs.range_supported }}
+          FILE_CONTENT_TYPE: ${{ steps.download.outputs.content_type }}
           FILE_SHA256: ${{ steps.download.outputs.sha256 }}
           SOURCE_HOST: ${{ steps.download.outputs.source_host }}
         shell: bash
@@ -126,6 +127,7 @@ jobs:
               summary.write(f"- Average speed: {os.environ['FILE_AVG_SPEED']} B/s\n")
               summary.write(f"- Parallel connections: {os.environ['FILE_CONNECTIONS']}\n")
               summary.write(f"- HTTP Range supported: {os.environ['RANGE_SUPPORTED']}\n")
+              summary.write(f"- Content type: {os.environ['FILE_CONTENT_TYPE']}\n")
               summary.write(f"- SHA-256: {os.environ['FILE_SHA256']}\n")
               summary.write(f"- Source host: {os.environ['SOURCE_HOST']}\n\n")
               summary.write(f"## [Download original file]({direct_url})\n\n")
