@@ -18,6 +18,18 @@ class DownloaderTests(unittest.TestCase):
     def test_empty_filename_fallback(self):
         self.assertEqual(MODULE.safe_filename("..."), "downloaded-file.bin")
 
+    def test_tls_verification_is_enabled_by_default(self):
+        import ssl
+        context = MODULE.build_ssl_context(False)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
+    def test_tls_verification_can_be_opted_out(self):
+        import ssl
+        context = MODULE.build_ssl_context(True)
+        self.assertEqual(context.verify_mode, ssl.CERT_NONE)
+        self.assertFalse(context.check_hostname)
+
     def test_only_http_https(self):
         for url in ("file:///etc/passwd", "ftp://example.org/file", "javascript:alert(1)"):
             with self.subTest(url=url):
