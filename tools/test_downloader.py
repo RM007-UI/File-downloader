@@ -18,6 +18,20 @@ class DownloaderTests(unittest.TestCase):
     def test_empty_filename_fallback(self):
         self.assertEqual(MODULE.safe_filename("..."), "downloaded-file.bin")
 
+    def test_progress_for_known_file_size(self):
+        message = MODULE.progress_message(50 * 1024 * 1024, 100 * 1024 * 1024, 10)
+        self.assertIn("50.0%", message)
+        self.assertIn("Downloaded:", message)
+        self.assertIn("Remaining:", message)
+        self.assertIn("Speed:", message)
+        self.assertIn("ETA:", message)
+
+    def test_progress_when_total_size_is_unknown(self):
+        message = MODULE.progress_message(5 * 1024 * 1024, None, 5)
+        self.assertIn("Total: unknown", message)
+        self.assertIn("Remaining: unknown", message)
+        self.assertIn("Progress: n/a", message)
+
     def test_tls_verification_is_enabled_by_default(self):
         import ssl
         context = MODULE.build_ssl_context(False)
