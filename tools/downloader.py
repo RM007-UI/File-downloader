@@ -21,7 +21,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
-MAX_BYTES = 1900 * 1024 * 1024
+DEFAULT_MAX_BYTES = 1900 * 1024 * 1024
+MAX_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(DEFAULT_MAX_BYTES)))
 CHUNK_SIZE = 8 * 1024 * 1024          # 8 MiB — fewer I/O ops, higher throughput
 MIN_PARALLEL_SIZE = 4 * 1024 * 1024
 TIMEOUT_SECONDS = 90
