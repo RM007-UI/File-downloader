@@ -23,6 +23,7 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_ope
 
 DEFAULT_MAX_BYTES = 1900 * 1024 * 1024
 MAX_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(DEFAULT_MAX_BYTES)))
+DOWNLOAD_PROGRESS_CALLBACK = None
 CHUNK_SIZE = 8 * 1024 * 1024          # 8 MiB — fewer I/O ops, higher throughput
 MIN_PARALLEL_SIZE = 4 * 1024 * 1024
 TIMEOUT_SECONDS = 90
@@ -113,14 +114,20 @@ class ProgressReporter:
             time_due = now - self.last_report_at >= 2.0
             percent_due = percent is not None and percent - self.last_percent >= 5.0
             if force or time_due or percent_due:
-                print(
-                    "[download-progress] "
-                    + progress_message(self.downloaded, self.total, elapsed),
-                    flush=True,
-                )
+                message = progress_message(self.downloaded, self.total, elapsed)
+                print("[download-progress] " + message, flush=True)
                 self.last_report_at = now
                 if percent is not None:
                     self.last_percent = percent
+                callback = DOWNLOAD_PROGRESS_CALLBACK
+                if callback is not None:
+                    try:
+                        callback(self.downloaded, self.total, elapsed, message)
+                    except Exception as exc:
+                        print(
+                            "[progress-callback-warning] " + type(exc).__name__,
+                            flush=True,
+                        )
 
     def finish(self) -> float:
         self.flush(force=True)
